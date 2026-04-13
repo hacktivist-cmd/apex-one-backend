@@ -10,13 +10,13 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const User = require('./models/User');
+const Transaction = require('./models/Transaction');
 const { errorHandler } = require('./middleware/errorHandler');
-const { setupSocket } = require('./socket/socket');
+const { setupSocket, emitBalanceUpdate } = require('./socket/socket');
 
 const app = express();
 const server = http.createServer(app);
 
-// ✅ Change this to your actual frontend URL (Netlify)
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://apex-one-usa.netlify.app';
 
 const io = socketIo(server, {
@@ -40,9 +40,7 @@ app.get('/ping', (req, res) => res.send('pong'));
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { fullName, email, password } = req.body;
-    if (!fullName || !email || !password) {
-      return res.status(400).json({ message: 'All fields required' });
-    }
+    if (!fullName || !email || !password) return res.status(400).json({ message: 'All fields required' });
     const existing = await User.findOne({ email });
     if (existing) return res.status(400).json({ message: 'Email already exists' });
     const hashed = await bcrypt.hash(password, 10);
@@ -60,27 +58,10 @@ app.post('/api/auth/login', async (req, res) => {
     if (!user) return res.status(401).json({ message: 'Invalid credentials' });
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) return res.status(401).json({ message: 'Invalid credentials' });
-    const accessToken = jwt.sign(
-      { id: user._id, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '15m' }
-    );
-    const refreshToken = jwt.sign(
-      { id: user._id },
-      process.env.REFRESH_SECRET,
-      { expiresIn: '7d' }
-    );
+    const accessToken = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '15m' });
+    const refreshToken = jwt.sign({ id: user._id }, process.env.REFRESH_SECRET, { expiresIn: '7d' });
     res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'none' });
-    res.json({
-      accessToken,
-      user: {
-        id: user._id,
-        fullName: user.fullName,
-        email: user.email,
-        role: user.role,
-        availableBalance: user.availableBalance,
-      },
-    });
+    res.json({ accessToken, user: { id: user._id, fullName: user.fullName, email, role: user.role, availableBalance: user.availableBalance } });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -91,11 +72,7 @@ app.post('/api/auth/refresh', (req, res) => {
   if (!token) return res.status(401).json({ message: 'No refresh token' });
   jwt.verify(token, process.env.REFRESH_SECRET, (err, decoded) => {
     if (err) return res.status(403).json({ message: 'Invalid refresh token' });
-    const newAccessToken = jwt.sign(
-      { id: decoded.id, role: decoded.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '15m' }
-    );
+    const newAccessToken = jwt.sign({ id: decoded.id, role: decoded.role }, process.env.JWT_SECRET, { expiresIn: '15m' });
     res.json({ accessToken: newAccessToken });
   });
 });
@@ -130,6 +107,79 @@ app.post('/api/user/change-password', authMiddleware, async (req, res) => {
   res.json({ message: 'Password updated' });
 });
 
+// ========== DEPOSIT REQUEST (USER) ==========
+app.post('/api/deposit/request', authMiddleware, async (req, res) => {
+  const { amount, cryptoType, cryptoTxId } = req.body;
+  const transaction = await Transaction.create({
+    userId: req.user.id,
+    type: 'DEPOSIT',
+    amount,
+    cryptoType,
+    cryptoTxId,
+    status: 'PENDING',
+  });
+  res.status(201).json({ message: 'Deposit request submitted', transaction });
+});
+
+// ========== WITHDRAWAL REQUEST (USER) ==========
+app.post('/api/withdrawals', authMiddleware, async (req, res) => {
+  const { amount, destinationAddr, cryptoType } = req.body;
+  const user = await User.findById(req.user.id);
+  if (user.availableBalance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+  // Lock the amount? For simplicity, we'll deduct only after approval.
+  const transaction = await Transaction.create({
+    userId: req.user.id,
+    type: 'WITHDRAWAL',
+    amount,
+    destinationAddr,
+    cryptoType,
+    status: 'PENDING',
+  });
+  res.status(201).json({ message: 'Withdrawal request submitted', transaction });
+});
+
+app.get('/api/withdrawals', authMiddleware, async (req, res) => {
+  const transactions = await Transaction.find({ userId: req.user.id, type: 'WITHDRAWAL' });
+  res.json(transactions);
+});
+
+// ========== ADMIN: MANAGE REQUESTS ==========
+app.get('/api/admin/transactions', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const transactions = await Transaction.find().populate('userId', 'fullName email');
+  res.json(transactions);
+});
+
+app.patch('/api/admin/transactions/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { status, adminNotes } = req.body;
+  const tx = await Transaction.findById(req.params.id);
+  if (!tx) return res.status(404).json({ message: 'Transaction not found' });
+  tx.status = status;
+  if (adminNotes) tx.adminNotes = adminNotes;
+  await tx.save();
+
+  // If approved and deposit, add to user balance
+  if (status === 'APPROVED') {
+    const user = await User.findById(tx.userId);
+    if (tx.type === 'DEPOSIT') {
+      user.availableBalance += tx.amount;
+      await user.save();
+      emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+    } else if (tx.type === 'WITHDRAWAL') {
+      // Withdrawal: deduct balance (already locked? We'll deduct now)
+      if (user.availableBalance >= tx.amount) {
+        user.availableBalance -= tx.amount;
+        await user.save();
+        emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+      } else {
+        return res.status(400).json({ message: 'Insufficient balance for withdrawal' });
+      }
+    }
+  }
+  res.json(tx);
+});
+
 // ========== ADMIN USERS MANAGEMENT ==========
 app.get('/api/admin/users', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
@@ -143,13 +193,7 @@ app.post('/api/admin/users', authMiddleware, async (req, res) => {
   const existing = await User.findOne({ email });
   if (existing) return res.status(400).json({ message: 'Email already exists' });
   const hashed = await bcrypt.hash(password, 10);
-  const user = await User.create({
-    fullName,
-    email,
-    passwordHash: hashed,
-    role: role || 'USER',
-    availableBalance: availableBalance || 0,
-  });
+  const user = await User.create({ fullName, email, passwordHash: hashed, role: role || 'USER', availableBalance: availableBalance || 0 });
   res.status(201).json(user);
 });
 
@@ -162,39 +206,31 @@ app.delete('/api/admin/users/:id', authMiddleware, async (req, res) => {
 app.patch('/api/admin/users/:id/balance', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const { availableBalance } = req.body;
-  const user = await User.findByIdAndUpdate(
-    req.params.id,
-    { availableBalance },
-    { new: true }
-  ).select('-passwordHash');
+  const user = await User.findByIdAndUpdate(req.params.id, { availableBalance }, { new: true }).select('-passwordHash');
+  emitBalanceUpdate(req.params.id, user.availableBalance, user.lockedBalance);
   res.json(user);
 });
 
-// ========== SIMULATION (Wealth Rise Engine) ==========
-// We'll store active simulations in memory (for demo)
-const activeSimulations = new Map(); // userId -> interval
+// ========== SIMULATION ==========
+const activeSimulations = new Map();
 
 app.post('/api/admin/simulation/start', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const { userId, growthRate } = req.body; // growthRate in percent per tick
+  const { userId, growthRate } = req.body;
   if (activeSimulations.has(userId)) {
     clearInterval(activeSimulations.get(userId));
     activeSimulations.delete(userId);
   }
   const interval = setInterval(async () => {
     const user = await User.findById(userId);
-    if (!user) {
-      clearInterval(interval);
-      activeSimulations.delete(userId);
-      return;
-    }
+    if (!user) { clearInterval(interval); activeSimulations.delete(userId); return; }
     const increment = user.availableBalance * (growthRate / 100);
     user.availableBalance += increment;
     await user.save();
-    // Emit socket event if needed
+    emitBalanceUpdate(userId, user.availableBalance, user.lockedBalance);
   }, 3000);
   activeSimulations.set(userId, interval);
-  res.json({ message: 'Simulation started', growthRate });
+  res.json({ message: 'Simulation started' });
 });
 
 app.post('/api/admin/simulation/stop', authMiddleware, async (req, res) => {
@@ -203,24 +239,12 @@ app.post('/api/admin/simulation/stop', authMiddleware, async (req, res) => {
   if (activeSimulations.has(userId)) {
     clearInterval(activeSimulations.get(userId));
     activeSimulations.delete(userId);
-    res.json({ message: 'Simulation stopped' });
-  } else {
-    res.json({ message: 'No active simulation for this user' });
   }
+  res.json({ message: 'Simulation stopped' });
 });
 
-// ========== OTHER PLACEHOLDERS (deposit, withdrawal, trade, contact) ==========
-app.post('/api/deposit/request', authMiddleware, (req, res) => res.status(201).json({ message: 'Deposit request received' }));
-app.post('/api/withdrawals', authMiddleware, async (req, res) => {
-  const { amount } = req.body;
-  const user = await User.findById(req.user.id);
-  if (user.availableBalance < amount) return res.status(400).json({ message: 'Insufficient balance' });
-  user.availableBalance -= amount;
-  await user.save();
-  res.status(201).json({ message: 'Withdrawal submitted' });
-});
-app.get('/api/withdrawals', authMiddleware, (req, res) => res.json([]));
-app.post('/api/trade', authMiddleware, (req, res) => res.status(201).json({ message: 'Trade executed' }));
+// ========== TRADE & CONTACT ==========
+app.post('/api/trade', authMiddleware, (req, res) => res.status(201).json({ message: 'Trade executed (simulated)' }));
 app.get('/api/trade', authMiddleware, (req, res) => res.json([]));
 app.post('/api/contact', (req, res) => res.status(201).json({ message: 'Message sent' }));
 
