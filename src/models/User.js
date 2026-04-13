@@ -12,6 +12,7 @@ const userSchema = new mongoose.Schema({
   profilePicture: { type: String, default: '' },
   kycStatus: { type: String, enum: ['PENDING', 'VERIFIED', 'REJECTED'], default: 'PENDING' },
   kycDocuments: [{ type: String }],
+  ssnLast4: { type: String, default: '' },
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

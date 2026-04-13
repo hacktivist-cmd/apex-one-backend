@@ -253,3 +253,60 @@ setupSocket(io);
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// ========== NEWSLETTER ==========
+const Newsletter = require('./models/Newsletter');
+
+app.post('/api/newsletter/subscribe', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ message: 'Email required' });
+  const existing = await Newsletter.findOne({ email });
+  if (existing) return res.status(400).json({ message: 'Already subscribed' });
+  await Newsletter.create({ email });
+  res.json({ message: 'Subscribed successfully' });
+});
+
+app.get('/api/admin/newsletter', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const subscribers = await Newsletter.find().sort({ subscribedAt: -1 });
+  res.json(subscribers);
+});
+
+app.delete('/api/admin/newsletter/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  await Newsletter.findByIdAndDelete(req.params.id);
+  res.json({ message: 'Subscriber removed' });
+});
+
+// ========== MESSAGE MANAGEMENT (ensure ContactMessage model exists) ==========
+app.get('/api/admin/contact-messages', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const messages = await ContactMessage.find().sort({ createdAt: -1 }).populate('userId', 'fullName email');
+  res.json(messages);
+});
+
+app.patch('/api/admin/contact-messages/:id/read', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  await ContactMessage.findByIdAndUpdate(req.params.id, { isRead: true });
+  res.json({ success: true });
+});
+
+app.delete('/api/admin/contact-messages/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  await ContactMessage.findByIdAndDelete(req.params.id);
+  res.json({ message: 'Message deleted' });
+});
+
+// ========== KYC ADMIN ==========
+app.get('/api/admin/kyc/pending', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const users = await User.find({ kycStatus: 'PENDING' }).select('fullName email kycDocuments ssnLast4 createdAt');
+  res.json(users);
+});
+
+app.patch('/api/admin/kyc/:userId', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { status } = req.body;
+  const user = await User.findByIdAndUpdate(req.params.userId, { kycStatus: status }, { new: true });
+  res.json(user);
+});

@@ -50,3 +50,17 @@ router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
 });
 
 module.exports = router;
+
+// Submit KYC document (ID + SSN)
+router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
+  const { ssn } = req.body;
+  const user = await User.findById(req.user.id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  // Store only last 4 digits of SSN
+  const last4 = ssn.slice(-4);
+  user.kycDocuments.push(req.file.path);
+  user.kycStatus = 'PENDING';
+  user.ssnLast4 = last4;  // you may add this field to the User model
+  await user.save();
+  res.json({ message: 'KYC documents submitted' });
+});
