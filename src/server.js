@@ -22,8 +22,8 @@ const app = express();
 const server = http.createServer(app);
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://apex-one-usa.netlify.app';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://apex-one-backend.onrender.com';
 
-// Socket.io CORS
 const io = socketIo(server, {
   cors: { origin: FRONTEND_URL, credentials: true },
 });
@@ -40,11 +40,11 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 // Passport initialization
 app.use(passport.initialize());
 
-// ========== GOOGLE OAUTH ==========
+// ========== GOOGLE OAUTH STRATEGY ==========
 passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: `${process.env.BACKEND_URL}/api/auth/google/callback`
+    callbackURL: `${BACKEND_URL}/api/auth/google/callback`
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
@@ -74,6 +74,7 @@ passport.use(new GoogleStrategy({
   }
 ));
 
+// ========== GOOGLE OAUTH ROUTES ==========
 app.get('/api/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 
 app.get('/api/auth/google/callback', 
@@ -96,7 +97,7 @@ app.get('/api/auth/google/callback',
 app.get('/', (req, res) => res.send('Backend alive'));
 app.get('/ping', (req, res) => res.send('pong'));
 
-// ========== REGISTRATION (with full fields) ==========
+// ========== REGISTRATION ==========
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { firstName, middleName, lastName, email, password, phone, postcode } = req.body;
@@ -174,7 +175,7 @@ app.post('/api/user/change-password', authMiddleware, async (req, res) => {
   res.json({ message: 'Password updated' });
 });
 
-// ========== DEPOSIT & WITHDRAWAL REQUESTS ==========
+// ========== DEPOSIT & WITHDRAWAL ==========
 app.post('/api/deposit/request', authMiddleware, async (req, res) => {
   const { amount, cryptoType, cryptoTxId } = req.body;
   const transaction = await Transaction.create({
@@ -295,11 +296,11 @@ app.post('/api/admin/simulation/stop', authMiddleware, async (req, res) => {
   res.json({ message: 'Simulation stopped' });
 });
 
-// ========== TRADE & CONTACT ==========
+// ========== TRADE ==========
 app.post('/api/trade', authMiddleware, (req, res) => res.status(201).json({ message: 'Trade executed (simulated)' }));
 app.get('/api/trade', authMiddleware, (req, res) => res.json([]));
 
-// Contact form (public)
+// ========== CONTACT (public) ==========
 app.post('/api/contact', async (req, res) => {
   const { name, email, message, userId } = req.body;
   await ContactMessage.create({ name, email, message, userId });
