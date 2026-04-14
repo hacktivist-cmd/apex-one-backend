@@ -37,7 +37,7 @@ app.use(helmet());
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 app.use('/uploads', express.static('uploads'));
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 10000 }));
 app.use(passport.initialize());
 
 // ========== GOOGLE OAUTH ==========
@@ -349,3 +349,68 @@ app.use('/uploads', express.static('uploads'));
 
 // Serve uploaded files statically
 app.use('/uploads', express.static('uploads'));
+
+// Serve uploaded files (must be before routes)
+app.use('/uploads', express.static('uploads'));
+
+// Serve uploaded files statically
+app.use('/uploads', express.static('uploads'));
+
+// Simulation intervals storage (global)
+const activeSimulations = new Map(); // userId -> interval
+let globalSimulationInterval = null;
+
+app.post('/api/admin/simulation/start', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { userId, growthRate } = req.body;
+  if (activeSimulations.has(userId)) {
+    clearInterval(activeSimulations.get(userId));
+    activeSimulations.delete(userId);
+  }
+  const interval = setInterval(async () => {
+    const user = await User.findById(userId);
+    if (!user) { clearInterval(interval); activeSimulations.delete(userId); return; }
+    const increment = user.availableBalance * (growthRate / 100);
+    user.availableBalance += increment;
+    await user.save();
+    emitBalanceUpdate(userId, user.availableBalance, user.lockedBalance);
+  }, 3000);
+  activeSimulations.set(userId, interval);
+  res.json({ message: 'Simulation started' });
+});
+
+app.post('/api/admin/simulation/stop', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { userId } = req.body;
+  if (activeSimulations.has(userId)) {
+    clearInterval(activeSimulations.get(userId));
+    activeSimulations.delete(userId);
+  }
+  res.json({ message: 'Simulation stopped' });
+});
+
+// Global simulation (all users)
+app.post('/api/admin/simulation/start-all', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { growthRate } = req.body;
+  if (globalSimulationInterval) clearInterval(globalSimulationInterval);
+  globalSimulationInterval = setInterval(async () => {
+    const users = await User.find({ role: 'USER' });
+    for (const user of users) {
+      const increment = user.availableBalance * (growthRate / 100);
+      user.availableBalance += increment;
+      await user.save();
+      emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+    }
+  }, 3000);
+  res.json({ message: 'Global simulation started' });
+});
+
+app.post('/api/admin/simulation/stop-all', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  if (globalSimulationInterval) {
+    clearInterval(globalSimulationInterval);
+    globalSimulationInterval = null;
+  }
+  res.json({ message: 'Global simulation stopped' });
+});

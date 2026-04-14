@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
+const fs = require('fs');
 const { authMiddleware } = require('../middleware/auth');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
@@ -37,8 +38,18 @@ router.put('/profile', async (req, res) => {
 });
 
 router.post('/upload-picture', upload.single('profilePicture'), async (req, res) => {
-  const user = await User.findByIdAndUpdate(req.user.id, { profilePicture: req.file.path }, { new: true });
-  res.json({ message: 'Uploaded', path: req.file.path });
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+    const fileBuffer = fs.readFileSync(req.file.path);
+    const base64 = fileBuffer.toString('base64');
+    const mimeType = req.file.mimetype;
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+    const user = await User.findByIdAndUpdate(req.user.id, { profilePicture: dataUrl }, { new: true });
+    fs.unlinkSync(req.file.path);
+    res.json({ message: 'Uploaded', profilePicture: dataUrl });
+  } catch (err) {
+    res.status(500).json({ message: 'Upload failed' });
+  }
 });
 
 router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
