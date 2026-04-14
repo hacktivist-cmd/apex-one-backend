@@ -42,15 +42,22 @@ router.post('/upload-picture', upload.single('profilePicture'), async (req, res)
 });
 
 router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
-  const { ssn } = req.body;
-  const user = await User.findById(req.user.id);
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  const last4 = ssn.slice(-4);
-  user.kycDocuments.push(req.file.path);
-  user.kycStatus = 'PENDING';
-  user.ssnLast4 = last4;
-  await user.save();
-  res.json({ message: 'KYC documents submitted' });
+  try {
+    const { ssn } = req.body;
+    if (!ssn || ssn.length < 4) return res.status(400).json({ message: 'SSN last 4 digits required' });
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const last4 = ssn.slice(-4);
+    user.kycDocuments.push(req.file.path);
+    user.kycStatus = 'PENDING';
+    user.ssnLast4 = last4;
+    await user.save();
+    res.json({ message: 'KYC submitted', status: 'PENDING' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 
 module.exports = router;
