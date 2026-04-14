@@ -64,3 +64,45 @@ router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
   await user.save();
   res.json({ message: 'KYC documents submitted' });
 });
+
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
+
+router.post('/upload-picture', upload.single('profilePicture'), async (req, res) => {
+  const user = await User.findByIdAndUpdate(req.user.id, { profilePicture: req.file.path }, { new: true });
+  res.json({ message: 'Uploaded', path: req.file.path });
+});
+
+// Update profile (email, phone)
+router.put('/profile', async (req, res) => {
+  const { email, phone } = req.body;
+  const user = await User.findByIdAndUpdate(req.user.id, { email, phone }, { new: true });
+  res.json(user);
+});
+
+// Change password
+router.post('/change-password', async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+  const user = await User.findById(req.user.id);
+  const bcrypt = require('bcryptjs');
+  const valid = await bcrypt.compare(oldPassword, user.passwordHash);
+  if (!valid) return res.status(401).json({ message: 'Wrong password' });
+  user.passwordHash = await bcrypt.hash(newPassword, 10);
+  await user.save();
+  res.json({ message: 'Password updated' });
+});
+
+// Upload profile picture (already exists, but ensure it's there)
+// If not, add it:
+// router.post('/upload-picture', upload.single('profilePicture'), async (req, res) => {
+//   const user = await User.findByIdAndUpdate(req.user.id, { profilePicture: req.file.path }, { new: true });
+//   res.json({ message: 'Uploaded', path: req.file.path });
+// });
+
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
+
+router.post('/upload-picture', upload.single('profilePicture'), async (req, res) => {
+  const user = await User.findByIdAndUpdate(req.user.id, { profilePicture: req.file.path }, { new: true });
+  res.json({ message: 'Uploaded', path: req.file.path });
+});
