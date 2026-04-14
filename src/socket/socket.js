@@ -18,3 +18,5 @@ function emitBalanceUpdate(userId, availableBalance, lockedBalance) {
 }
 
 module.exports = { setupSocket, emitBalanceUpdate };
+
+module.exports = { setupSocket, emitBalanceUpdate, userSockets };

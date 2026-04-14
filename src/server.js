@@ -530,3 +530,35 @@ app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
   await Review.findByIdAndDelete(req.params.id);
   res.json({ message: 'Review deleted' });
 });
+
+// ========== NOTIFICATIONS ==========
+const Notification = require('./models/Notification');
+
+// Get user notifications
+app.get('/api/user/notifications', authMiddleware, async (req, res) => {
+  const notifications = await Notification.find({ userId: req.user.id }).sort({ createdAt: -1 }).limit(50);
+  res.json(notifications);
+});
+
+// Mark notification as read
+app.patch('/api/user/notifications/:id/read', authMiddleware, async (req, res) => {
+  await Notification.findByIdAndUpdate(req.params.id, { isRead: true });
+  res.json({ success: true });
+});
+
+// Helper function to create notification (must be placed after io is defined)
+// Add this inside the socket setup section or after io is defined.
+// We'll add a separate function that uses io from the socket module.
+
+// Helper to create and emit notification
+async function createNotification(userId, title, message, type = 'INFO') {
+  const notification = await Notification.create({ userId, title, message, type });
+  const socketId = userSockets.get(userId);
+  if (socketId) io.to(socketId).emit('notification', notification);
+}
+
+// ========== USER TRANSACTIONS ==========
+app.get('/api/user/transactions', authMiddleware, async (req, res) => {
+  const transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 });
+  res.json(transactions);
+});
