@@ -541,3 +541,103 @@ app.post('/api/admin/simulation/stop-all', authMiddleware, async (req, res) => {
   }
   res.json({ message: 'Global simulation stopped' });
 });
+
+// ========== INVESTMENT (with vesting) ==========
+const Investment = require('./models/Investment');
+
+app.post('/api/invest', authMiddleware, async (req, res) => {
+  try {
+    const { symbol, amount, quantity } = req.body;
+    
+    // Minimum investment check
+    if (amount < 5000) {
+      return res.status(400).json({ message: 'Minimum investment is $5,000' });
+    }
+    
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    
+    if (user.availableBalance < amount) {
+      return res.status(400).json({ message: 'Insufficient balance' });
+    }
+    
+    // Deduct balance
+    user.availableBalance -= amount;
+    await user.save();
+    emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+    
+    // Calculate vesting date (2 weeks from now)
+    const vestingDate = new Date();
+    vestingDate.setDate(vestingDate.getDate() + 14);
+    
+    // Create investment record
+    const investment = await Investment.create({
+      userId: req.user.id,
+      amount,
+      symbol,
+      quantity: quantity || 0,
+      vestingDate,
+      status: 'ACTIVE',
+    });
+    
+    // Record transaction
+    await Transaction.create({
+      userId: req.user.id,
+      type: 'INVESTMENT',
+      amount,
+      cryptoType: symbol,
+      status: 'APPROVED',
+      adminNotes: `Invested in ${symbol} - Vesting until ${vestingDate.toDateString()}`,
+    });
+    
+    res.status(201).json({
+      message: 'Investment successful',
+      investment,
+      vestingDate,
+      newBalance: user.availableBalance,
+    });
+  } catch (err) {
+    console.error('Investment error:', err);
+    res.status(500).json({ message: 'Investment failed', error: err.message });
+  }
+});
+
+// Get user's active investments
+app.get('/api/investments/active', authMiddleware, async (req, res) => {
+  const investments = await Investment.find({ userId: req.user.id, status: 'ACTIVE' }).sort({ createdAt: -1 });
+  res.json(investments);
+});
+
+// Get all user investments (history)
+app.get('/api/investments', authMiddleware, async (req, res) => {
+  const investments = await Investment.find({ userId: req.user.id }).sort({ createdAt: -1 });
+  res.json(investments);
+});
+
+// Admin: Process matured investments (can be called via cron job)
+app.post('/api/admin/process-matured', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const matured = await Investment.find({ status: 'ACTIVE', vestingDate: { $lte: new Date() } });
+  let count = 0;
+  for (const inv of matured) {
+    inv.status = 'MATURED';
+    await inv.save();
+    // Add profit (example: 5% return)
+    const profit = inv.amount * 0.05;
+    const user = await User.findById(inv.userId);
+    if (user) {
+      user.availableBalance += inv.amount + profit;
+      await user.save();
+      emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+      await Transaction.create({
+        userId: inv.userId,
+        type: 'PAYOUT',
+        amount: inv.amount + profit,
+        status: 'APPROVED',
+        adminNotes: `Matured investment in ${inv.symbol} with profit`,
+      });
+      count++;
+    }
+  }
+  res.json({ message: `Processed ${count} matured investments` });
+});
