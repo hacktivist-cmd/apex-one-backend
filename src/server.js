@@ -446,3 +446,87 @@ app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
   await Review.findByIdAndDelete(req.params.id);
   res.json({ message: 'Review deleted' });
 });
+
+// ========== REVIEWS (public submit & admin manage) ==========
+const Review = require('./models/Review');
+
+// Public: submit a review (pending approval)
+app.post('/api/reviews/submit', async (req, res) => {
+  const { name, email, rating, text } = req.body;
+  if (!name || !email || !rating || !text) {
+    return res.status(400).json({ message: 'All fields required' });
+  }
+  const review = await Review.create({
+    name, email, rating, text, isActive: false
+  });
+  res.status(201).json({ message: 'Review submitted for approval', review });
+});
+
+// Public: get approved reviews (for landing page)
+app.get('/api/reviews', async (req, res) => {
+  const reviews = await Review.find({ isActive: true }).sort({ createdAt: -1 });
+  res.json(reviews);
+});
+
+// Admin: get all reviews (including pending)
+app.get('/api/admin/reviews', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const reviews = await Review.find().sort({ createdAt: -1 });
+  res.json(reviews);
+});
+
+// Admin: approve/reject a review
+app.patch('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { isActive } = req.body; // true = approved, false = rejected/pending
+  const review = await Review.findByIdAndUpdate(req.params.id, { isActive, updatedAt: Date.now() }, { new: true });
+  res.json(review);
+});
+
+// Admin: delete a review
+app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  await Review.findByIdAndDelete(req.params.id);
+  res.json({ message: 'Review deleted' });
+});
+
+// ========== REVIEWS SYSTEM ==========
+const Review = require('./models/Review');
+
+// Public: submit a review (pending approval)
+app.post('/api/reviews/submit', async (req, res) => {
+  const { name, email, rating, text } = req.body;
+  if (!name || !email || !rating || !text) {
+    return res.status(400).json({ message: 'All fields required' });
+  }
+  const review = await Review.create({ name, email, rating, text, isActive: false });
+  res.status(201).json({ message: 'Review submitted for approval' });
+});
+
+// Public: get approved reviews
+app.get('/api/reviews', async (req, res) => {
+  const reviews = await Review.find({ isActive: true }).sort({ createdAt: -1 });
+  res.json(reviews);
+});
+
+// Admin: get all reviews (pending + approved)
+app.get('/api/admin/reviews', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const reviews = await Review.find().sort({ createdAt: -1 });
+  res.json(reviews);
+});
+
+// Admin: approve/reject review
+app.patch('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { isActive } = req.body;
+  const review = await Review.findByIdAndUpdate(req.params.id, { isActive }, { new: true });
+  res.json(review);
+});
+
+// Admin: delete review
+app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  await Review.findByIdAndDelete(req.params.id);
+  res.json({ message: 'Review deleted' });
+});
