@@ -136,3 +136,19 @@ router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
   await user.save();
   res.json({ message: 'KYC documents submitted' });
 });
+
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
+
+// Submit KYC documents (ID + SSN)
+router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
+  const { ssn } = req.body;
+  const user = await User.findById(req.user.id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  const last4 = ssn.slice(-4);
+  user.kycDocuments.push(req.file.path);
+  user.kycStatus = 'PENDING';
+  user.ssnLast4 = last4;
+  await user.save();
+  res.json({ message: 'KYC documents submitted' });
+});
