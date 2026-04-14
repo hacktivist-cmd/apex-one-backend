@@ -402,7 +402,6 @@ const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 
 // ========== REVIEWS (public + authenticated) ==========
-const Review = require('./models/Review');
 
 // Public: get approved reviews
 app.get('/api/reviews', async (req, res) => {
@@ -448,7 +447,6 @@ app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
 });
 
 // ========== REVIEWS (public submit & admin manage) ==========
-const Review = require('./models/Review');
 
 // Public: submit a review (pending approval)
 app.post('/api/reviews/submit', async (req, res) => {
@@ -491,7 +489,6 @@ app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
 });
 
 // ========== REVIEWS SYSTEM ==========
-const Review = require('./models/Review');
 
 // Public: submit a review (pending approval)
 app.post('/api/reviews/submit', async (req, res) => {
@@ -569,13 +566,11 @@ app.post('/api/reviews/submit', async (req, res) => {
   if (!name || !email || !rating || !text) {
     return res.status(400).json({ message: 'All fields required' });
   }
-  const Review = require('./models/Review');
   const review = await Review.create({ name, email, rating, text, isActive: false });
   res.status(201).json({ message: 'Review submitted for approval' });
 });
 
 // ========== REVIEWS (PUBLIC SUBMISSION) ==========
-const Review = require('./models/Review');
 
 app.post('/api/reviews/submit', async (req, res) => {
   const { name, email, rating, text } = req.body;
@@ -624,7 +619,6 @@ app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
 });
 
 // ========== REVIEWS (PUBLIC SUBMISSION) ==========
-const Review = require('./models/Review');
 
 app.post('/api/reviews/submit', async (req, res) => {
   const { name, email, rating, text } = req.body;
