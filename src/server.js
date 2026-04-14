@@ -37,7 +37,7 @@ app.use(helmet());
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 app.use('/uploads', express.static('uploads'));
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 10000 }));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100000 }));
 app.use(passport.initialize());
 
 // ========== GOOGLE OAUTH ==========
@@ -390,6 +390,133 @@ app.post('/api/admin/simulation/stop', authMiddleware, async (req, res) => {
 });
 
 // Global simulation (all users)
+app.post('/api/admin/simulation/start-all', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { growthRate } = req.body;
+  if (globalSimulationInterval) clearInterval(globalSimulationInterval);
+  globalSimulationInterval = setInterval(async () => {
+    const users = await User.find({ role: 'USER' });
+    for (const user of users) {
+      const increment = user.availableBalance * (growthRate / 100);
+      user.availableBalance += increment;
+      await user.save();
+      emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+    }
+  }, 3000);
+  res.json({ message: 'Global simulation started' });
+});
+
+app.post('/api/admin/simulation/stop-all', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  if (globalSimulationInterval) {
+    clearInterval(globalSimulationInterval);
+    globalSimulationInterval = null;
+  }
+  res.json({ message: 'Global simulation stopped' });
+});
+
+// ========== INVESTMENT (with vesting) ==========
+const Investment = require('./models/Investment');
+
+app.post('/api/invest', authMiddleware, async (req, res) => {
+  const { symbol, amount, quantity } = req.body;
+  if (amount < 5000) {
+    return res.status(400).json({ message: 'Minimum investment is $5,000' });
+  }
+  const user = await User.findById(req.user.id);
+  if (user.availableBalance < amount) {
+    return res.status(400).json({ message: 'Insufficient balance' });
+  }
+  user.availableBalance -= amount;
+  await user.save();
+  emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+  
+  const vestingDate = new Date();
+  vestingDate.setDate(vestingDate.getDate() + 14); // 2 weeks
+  
+  const investment = await Investment.create({
+    userId: req.user.id,
+    amount,
+    symbol,
+    quantity,
+    vestingDate,
+  });
+  
+  // Record transaction
+  await Transaction.create({
+    userId: req.user.id,
+    type: 'INVESTMENT',
+    amount,
+    cryptoType: symbol,
+    status: 'APPROVED',
+    adminNotes: `Invested in ${symbol} (${quantity} units) – Vesting until ${vestingDate.toDateString()}`,
+  });
+  
+  res.status(201).json({ message: 'Investment successful', investment, vestingDate });
+});
+
+app.get('/api/investments', authMiddleware, async (req, res) => {
+  const investments = await Investment.find({ userId: req.user.id }).sort({ createdAt: -1 });
+  res.json(investments);
+});
+
+// Admin: Process matured investments (cron job would call this daily)
+app.post('/api/admin/process-matured', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const matured = await Investment.find({ status: 'ACTIVE', vestingDate: { $lte: new Date() } });
+  for (const inv of matured) {
+    inv.status = 'MATURED';
+    await inv.save();
+    // Add profit to user balance (example: 5% return)
+    const profit = inv.amount * 0.05;
+    const user = await User.findById(inv.userId);
+    user.availableBalance += inv.amount + profit;
+    await user.save();
+    emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+    await Transaction.create({
+      userId: inv.userId,
+      type: 'PAYOUT',
+      amount: inv.amount + profit,
+      status: 'APPROVED',
+      adminNotes: `Matured investment in ${inv.symbol} with profit`,
+    });
+  }
+  res.json({ message: `Processed ${matured.length} matured investments` });
+});
+
+// ========== SIMULATION (persistent intervals) ==========
+const activeSimulations = new Map(); // userId -> interval
+let globalSimulationInterval = null;
+
+app.post('/api/admin/simulation/start', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { userId, growthRate } = req.body;
+  if (activeSimulations.has(userId)) {
+    clearInterval(activeSimulations.get(userId));
+    activeSimulations.delete(userId);
+  }
+  const interval = setInterval(async () => {
+    const user = await User.findById(userId);
+    if (!user) { clearInterval(interval); activeSimulations.delete(userId); return; }
+    const increment = user.availableBalance * (growthRate / 100);
+    user.availableBalance += increment;
+    await user.save();
+    emitBalanceUpdate(userId, user.availableBalance, user.lockedBalance);
+  }, 3000);
+  activeSimulations.set(userId, interval);
+  res.json({ message: 'Simulation started' });
+});
+
+app.post('/api/admin/simulation/stop', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { userId } = req.body;
+  if (activeSimulations.has(userId)) {
+    clearInterval(activeSimulations.get(userId));
+    activeSimulations.delete(userId);
+  }
+  res.json({ message: 'Simulation stopped' });
+});
+
 app.post('/api/admin/simulation/start-all', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const { growthRate } = req.body;
