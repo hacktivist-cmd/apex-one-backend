@@ -562,3 +562,131 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
   const transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 });
   res.json(transactions);
 });
+
+// ========== REVIEWS SUBMISSION (PUBLIC) ==========
+app.post('/api/reviews/submit', async (req, res) => {
+  const { name, email, rating, text } = req.body;
+  if (!name || !email || !rating || !text) {
+    return res.status(400).json({ message: 'All fields required' });
+  }
+  const Review = require('./models/Review');
+  const review = await Review.create({ name, email, rating, text, isActive: false });
+  res.status(201).json({ message: 'Review submitted for approval' });
+});
+
+// ========== REVIEWS (PUBLIC SUBMISSION) ==========
+const Review = require('./models/Review');
+
+app.post('/api/reviews/submit', async (req, res) => {
+  const { name, email, rating, text } = req.body;
+  if (!name || !email || !rating || !text) {
+    return res.status(400).json({ message: 'All fields required' });
+  }
+  const review = await Review.create({ name, email, rating, text, isActive: false });
+  res.status(201).json({ message: 'Review submitted for approval' });
+});
+
+// ========== KYC UPLOAD (with multer) ==========
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
+
+// KYC submission (already in user.js, but ensure it's correct)
+// If not present, add:
+router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
+  const { ssn } = req.body;
+  const user = await User.findById(req.user.id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  const last4 = ssn.slice(-4);
+  user.kycDocuments.push(req.file.path);
+  user.kycStatus = 'PENDING';
+  user.ssnLast4 = last4;
+  await user.save();
+  res.json({ message: 'KYC documents submitted' });
+});
+
+// ========== BALANCE HISTORY (for chart) ==========
+app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
+  // For simplicity, generate mock historical data based on current balance
+  // In production, store daily snapshots in EquityHistory model
+  const days = 7;
+  const history = [];
+  let current = req.user.availableBalance * 0.85;
+  for (let i = days; i >= 0; i--) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    history.push({
+      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      balance: current
+    });
+    current = current * (1 + (Math.random() - 0.5) * 0.05);
+  }
+  res.json(history);
+});
+
+// ========== REVIEWS (PUBLIC SUBMISSION) ==========
+const Review = require('./models/Review');
+
+app.post('/api/reviews/submit', async (req, res) => {
+  const { name, email, rating, text } = req.body;
+  if (!name || !email || !rating || !text) {
+    return res.status(400).json({ message: 'All fields required' });
+  }
+  const review = await Review.create({ name, email, rating, text, isActive: false });
+  res.status(201).json({ message: 'Review submitted for approval' });
+});
+
+// ========== KYC UPLOAD (with multer) ==========
+const multer = require('multer');
+const upload = multer({ dest: 'uploads/' });
+
+// KYC submission (already in user.js, but ensure it's correct)
+// If not present, add:
+router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
+  const { ssn } = req.body;
+  const user = await User.findById(req.user.id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  const last4 = ssn.slice(-4);
+  user.kycDocuments.push(req.file.path);
+  user.kycStatus = 'PENDING';
+  user.ssnLast4 = last4;
+  await user.save();
+  res.json({ message: 'KYC documents submitted' });
+});
+
+// ========== BALANCE HISTORY (for chart) ==========
+app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
+  // For simplicity, generate mock historical data based on current balance
+  // In production, store daily snapshots in EquityHistory model
+  const days = 7;
+  const history = [];
+  let current = req.user.availableBalance * 0.85;
+  for (let i = days; i >= 0; i--) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    history.push({
+      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      balance: current
+    });
+    current = current * (1 + (Math.random() - 0.5) * 0.05);
+  }
+  res.json(history);
+});
+
+// ========== BALANCE HISTORY ==========
+app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  const days = 7;
+  const history = [];
+  let current = user.availableBalance * 0.85;
+  for (let i = days; i >= 0; i--) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    history.push({
+      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      balance: current
+    });
+    current = current * (1 + (Math.random() - 0.5) * 0.05);
+  }
+  res.json(history);
+});
