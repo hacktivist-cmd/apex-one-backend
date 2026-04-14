@@ -400,3 +400,49 @@ setupSocket(io);
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// ========== REVIEWS (public + authenticated) ==========
+const Review = require('./models/Review');
+
+// Public: get approved reviews
+app.get('/api/reviews', async (req, res) => {
+  const reviews = await Review.find({ isActive: true }).sort({ createdAt: -1 }).populate('userId', 'fullName profilePicture');
+  res.json(reviews);
+});
+
+// Authenticated user: submit a review (pending)
+app.post('/api/reviews', authMiddleware, async (req, res) => {
+  const { text, rating } = req.body;
+  if (!text || !rating) return res.status(400).json({ message: 'Text and rating required' });
+  const user = await User.findById(req.user.id);
+  const review = await Review.create({
+    userId: req.user.id,
+    name: user.fullName,
+    text,
+    rating,
+    image: user.profilePicture || '',
+    isActive: false,
+  });
+  res.status(201).json({ message: 'Review submitted for approval', review });
+});
+
+// Admin: get all reviews (including pending)
+app.get('/api/admin/reviews', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const reviews = await Review.find().sort({ createdAt: -1 }).populate('userId', 'fullName email');
+  res.json(reviews);
+});
+
+// Admin: approve review (set isActive = true)
+app.patch('/api/admin/reviews/:id/approve', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const review = await Review.findByIdAndUpdate(req.params.id, { isActive: true }, { new: true });
+  res.json(review);
+});
+
+// Admin: reject/delete review
+app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  await Review.findByIdAndDelete(req.params.id);
+  res.json({ message: 'Review deleted' });
+});

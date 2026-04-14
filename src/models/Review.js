@@ -1,11 +1,12 @@
 const mongoose = require('mongoose');
 
 const reviewSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true },
   text: { type: String, required: true },
-  rating: { type: Number, min: 1, max: 5, default: 5 },
+  rating: { type: Number, min: 1, max: 5, required: true },
   image: { type: String, default: '' },
-  isActive: { type: Boolean, default: true },
+  isActive: { type: Boolean, default: false },  // false = pending, true = approved
   createdAt: { type: Date, default: Date.now },
 });
 
