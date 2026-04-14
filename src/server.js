@@ -15,10 +15,10 @@ const User = require('./models/User');
 const Transaction = require('./models/Transaction');
 const ContactMessage = require('./models/ContactMessage');
 const Newsletter = require('./models/Newsletter');
-const Notification = require('./models/Notification');
 const Review = require('./models/Review');
+const Notification = require('./models/Notification');
 const { errorHandler } = require('./middleware/errorHandler');
-const { setupSocket, emitBalanceUpdate } = require('./socket/socket');
+const { setupSocket, emitBalanceUpdate, userSockets } = require('./socket/socket');
 
 const app = express();
 const server = http.createServer(app);
@@ -26,9 +26,7 @@ const server = http.createServer(app);
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://apex-one-usa.netlify.app';
 const BACKEND_URL = process.env.BACKEND_URL || 'https://apex-one-backend.onrender.com';
 
-const io = socketIo(server, {
-  cors: { origin: FRONTEND_URL, credentials: true },
-});
+const io = socketIo(server, { cors: { origin: FRONTEND_URL, credentials: true } });
 
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ MongoDB connected'))
@@ -37,8 +35,7 @@ mongoose.connect(process.env.MONGODB_URI)
 app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(helmet());
 app.use(express.json());
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 5000 }));
-
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 app.use(passport.initialize());
 
 // ========== GOOGLE OAUTH ==========
@@ -69,14 +66,11 @@ passport.use(new GoogleStrategy({
         }
       }
       return done(null, user);
-    } catch (err) {
-      return done(err, null);
-    }
+    } catch (err) { return done(err, null); }
   }
 ));
 
 app.get('/api/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
-
 app.get('/api/auth/google/callback', 
   passport.authenticate('google', { session: false, failureRedirect: `${FRONTEND_URL}/login` }),
   (req, res) => {
@@ -93,29 +87,21 @@ app.get('/api/auth/google/callback',
   }
 );
 
-// ========== HEALTH ==========
 app.get('/', (req, res) => res.send('Backend alive'));
 app.get('/ping', (req, res) => res.send('pong'));
 
-// ========== AUTHENTICATION ==========
+// ========== AUTH ==========
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { firstName, middleName, lastName, email, password, phone, postcode } = req.body;
-    if (!firstName || !lastName || !email || !password) {
-      return res.status(400).json({ message: 'Required: firstName, lastName, email, password' });
-    }
+    if (!firstName || !lastName || !email || !password) return res.status(400).json({ message: 'Required fields missing' });
     const existing = await User.findOne({ email });
     if (existing) return res.status(400).json({ message: 'Email already exists' });
     const hashed = await bcrypt.hash(password, 10);
     const fullName = `${firstName} ${middleName ? middleName + ' ' : ''}${lastName}`;
-    const user = await User.create({
-      firstName, middleName, lastName, fullName, email, passwordHash: hashed,
-      phone: phone || '', postcode: postcode || '', role: 'USER', availableBalance: 0
-    });
+    const user = await User.create({ firstName, middleName, lastName, fullName, email, passwordHash: hashed, phone: phone || '', postcode: postcode || '', role: 'USER', availableBalance: 0 });
     res.status(201).json({ message: 'User created', userId: user._id });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+  } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -129,9 +115,7 @@ app.post('/api/auth/login', async (req, res) => {
     const refreshToken = jwt.sign({ id: user._id }, process.env.REFRESH_SECRET, { expiresIn: '7d' });
     res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: true, sameSite: 'none' });
     res.json({ accessToken, user: { id: user._id, fullName: user.fullName, email, role: user.role, availableBalance: user.availableBalance } });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+  } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 app.post('/api/auth/refresh', (req, res) => {
@@ -144,7 +128,6 @@ app.post('/api/auth/refresh', (req, res) => {
   });
 });
 
-// ========== AUTH MIDDLEWARE ==========
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ message: 'No token' });
@@ -153,25 +136,70 @@ const authMiddleware = (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
-  } catch {
-    res.status(401).json({ message: 'Invalid token' });
-  }
+  } catch { res.status(401).json({ message: 'Invalid token' }); }
 };
 
-// ========== USER PROFILE ==========
-app.get('/api/user/profile', authMiddleware, async (req, res) => {
-  const user = await User.findById(req.user.id).select('-passwordHash');
+// ========== USER ROUTES (profile, password, KYC) ==========
+const userRoutes = require('./routes/user');
+app.use('/api/user', userRoutes);
+
+// ========== ADMIN ROUTES (simplified) ==========
+app.get('/api/admin/users', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const users = await User.find().select('-passwordHash');
+  res.json(users);
+});
+app.patch('/api/admin/users/:id/balance', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { availableBalance } = req.body;
+  const user = await User.findByIdAndUpdate(req.params.id, { availableBalance }, { new: true }).select('-passwordHash');
+  emitBalanceUpdate(req.params.id, user.availableBalance, user.lockedBalance);
   res.json(user);
 });
+app.get('/api/admin/transactions', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const transactions = await Transaction.find().populate('userId', 'fullName email');
+  res.json(transactions);
+});
+app.patch('/api/admin/transactions/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const { status } = req.body;
+  const tx = await Transaction.findById(req.params.id);
+  if (!tx) return res.status(404).json({ message: 'Not found' });
+  tx.status = status;
+  await tx.save();
+  if (status === 'APPROVED') {
+    const user = await User.findById(tx.userId);
+    if (tx.type === 'DEPOSIT') user.availableBalance += tx.amount;
+    else if (tx.type === 'WITHDRAWAL') user.availableBalance -= tx.amount;
+    await user.save();
+    emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
+  }
+  res.json(tx);
+});
 
-app.post('/api/user/change-password', authMiddleware, async (req, res) => {
-  const { oldPassword, newPassword } = req.body;
+// ========== DEPOSIT & WITHDRAWAL ==========
+app.post('/api/deposit/request', authMiddleware, async (req, res) => {
+  const { amount, cryptoType, cryptoTxId } = req.body;
+  const tx = await Transaction.create({ userId: req.user.id, type: 'DEPOSIT', amount, cryptoType, cryptoTxId, status: 'PENDING' });
+  res.status(201).json({ message: 'Deposit request submitted', tx });
+});
+app.post('/api/withdrawals', authMiddleware, async (req, res) => {
+  const { amount, destinationAddr, cryptoType } = req.body;
   const user = await User.findById(req.user.id);
-  const valid = await bcrypt.compare(oldPassword, user.passwordHash);
-  if (!valid) return res.status(401).json({ message: 'Wrong password' });
-  user.passwordHash = await bcrypt.hash(newPassword, 10);
-  await user.save();
-  res.json({ message: 'Password updated' });
+  if (user.availableBalance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+  const tx = await Transaction.create({ userId: req.user.id, type: 'WITHDRAWAL', amount, destinationAddr, cryptoType, status: 'PENDING' });
+  res.status(201).json({ message: 'Withdrawal submitted', tx });
+});
+app.get('/api/withdrawals', authMiddleware, async (req, res) => {
+  const transactions = await Transaction.find({ userId: req.user.id, type: 'WITHDRAWAL' });
+  res.json(transactions);
+});
+
+// ========== USER TRANSACTIONS (all types) ==========
+app.get('/api/user/transactions', authMiddleware, async (req, res) => {
+  const transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 });
+  res.json(transactions);
 });
 
 // ========== BALANCE HISTORY ==========
@@ -184,146 +212,27 @@ app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
   for (let i = days; i >= 0; i--) {
     const date = new Date();
     date.setDate(date.getDate() - i);
-    history.push({
-      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      balance: current
-    });
+    history.push({ date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), balance: current });
     current = current * (1 + (Math.random() - 0.5) * 0.05);
   }
   res.json(history);
 });
 
-// ========== DEPOSIT & WITHDRAWAL ==========
-app.post('/api/deposit/request', authMiddleware, async (req, res) => {
-  const { amount, cryptoType, cryptoTxId } = req.body;
+// ========== INVESTMENT ==========
+app.post('/api/invest', authMiddleware, async (req, res) => {
+  const { symbol, amount, quantity } = req.body;
   const transaction = await Transaction.create({
-    userId: req.user.id, type: 'DEPOSIT', amount, cryptoType, cryptoTxId, status: 'PENDING'
+    userId: req.user.id,
+    type: 'INVESTMENT',
+    amount,
+    cryptoType: symbol,
+    status: 'APPROVED',
+    adminNotes: `Invested in ${symbol} (${quantity} units)`,
   });
-  res.status(201).json({ message: 'Deposit request submitted', transaction });
+  res.status(201).json(transaction);
 });
 
-app.post('/api/withdrawals', authMiddleware, async (req, res) => {
-  const { amount, destinationAddr, cryptoType } = req.body;
-  const user = await User.findById(req.user.id);
-  if (user.availableBalance < amount) return res.status(400).json({ message: 'Insufficient balance' });
-  const transaction = await Transaction.create({
-    userId: req.user.id, type: 'WITHDRAWAL', amount, destinationAddr, cryptoType, status: 'PENDING'
-  });
-  res.status(201).json({ message: 'Withdrawal request submitted', transaction });
-});
-
-app.get('/api/withdrawals', authMiddleware, async (req, res) => {
-  const transactions = await Transaction.find({ userId: req.user.id, type: 'WITHDRAWAL' });
-  res.json(transactions);
-});
-
-app.get('/api/user/transactions', authMiddleware, async (req, res) => {
-  const transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 });
-  res.json(transactions);
-});
-
-// ========== ADMIN: TRANSACTIONS ==========
-app.get('/api/admin/transactions', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const transactions = await Transaction.find().populate('userId', 'fullName email');
-  res.json(transactions);
-});
-
-app.patch('/api/admin/transactions/:id', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const { status, adminNotes } = req.body;
-  const tx = await Transaction.findById(req.params.id);
-  if (!tx) return res.status(404).json({ message: 'Transaction not found' });
-  tx.status = status;
-  if (adminNotes) tx.adminNotes = adminNotes;
-  await tx.save();
-  if (status === 'APPROVED') {
-    const user = await User.findById(tx.userId);
-    if (tx.type === 'DEPOSIT') {
-      user.availableBalance += tx.amount;
-      await user.save();
-      emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
-    } else if (tx.type === 'WITHDRAWAL') {
-      if (user.availableBalance >= tx.amount) {
-        user.availableBalance -= tx.amount;
-        await user.save();
-        emitBalanceUpdate(user._id, user.availableBalance, user.lockedBalance);
-      } else {
-        return res.status(400).json({ message: 'Insufficient balance for withdrawal' });
-      }
-    }
-  }
-  res.json(tx);
-});
-
-// ========== ADMIN USERS ==========
-app.get('/api/admin/users', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const users = await User.find().select('-passwordHash');
-  res.json(users);
-});
-
-app.post('/api/admin/users', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const { fullName, email, password, role, availableBalance } = req.body;
-  const existing = await User.findOne({ email });
-  if (existing) return res.status(400).json({ message: 'Email already exists' });
-  const hashed = await bcrypt.hash(password, 10);
-  const user = await User.create({ fullName, email, passwordHash: hashed, role: role || 'USER', availableBalance: availableBalance || 0 });
-  res.status(201).json(user);
-});
-
-app.delete('/api/admin/users/:id', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  await User.findByIdAndDelete(req.params.id);
-  res.json({ message: 'User deleted' });
-});
-
-app.patch('/api/admin/users/:id/balance', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const { availableBalance } = req.body;
-  const user = await User.findByIdAndUpdate(req.params.id, { availableBalance }, { new: true }).select('-passwordHash');
-  emitBalanceUpdate(req.params.id, user.availableBalance, user.lockedBalance);
-  res.json(user);
-});
-
-// ========== SIMULATION ==========
-const activeSimulations = new Map();
-
-app.post('/api/admin/simulation/start', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const { userId, growthRate } = req.body;
-  if (activeSimulations.has(userId)) {
-    clearInterval(activeSimulations.get(userId));
-    activeSimulations.delete(userId);
-  }
-  const interval = setInterval(async () => {
-    const user = await User.findById(userId);
-    if (!user) { clearInterval(interval); activeSimulations.delete(userId); return; }
-    const increment = user.availableBalance * (growthRate / 100);
-    user.availableBalance += increment;
-    await user.save();
-    emitBalanceUpdate(userId, user.availableBalance, user.lockedBalance);
-  }, 3000);
-  activeSimulations.set(userId, interval);
-  res.json({ message: 'Simulation started' });
-});
-
-app.post('/api/admin/simulation/stop', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const { userId } = req.body;
-  if (activeSimulations.has(userId)) {
-    clearInterval(activeSimulations.get(userId));
-    activeSimulations.delete(userId);
-  }
-  res.json({ message: 'Simulation stopped' });
-});
-
-// ========== TRADE ==========
-app.post('/api/trade', authMiddleware, (req, res) => res.status(201).json({ message: 'Trade executed (simulated)' }));
-app.get('/api/trade', authMiddleware, (req, res) => res.json([]));
-
-// ========== CONTACT ==========
+// ========== CONTACT (public) ==========
 app.post('/api/contact', async (req, res) => {
   const { name, email, message, userId } = req.body;
   await ContactMessage.create({ name, email, message, userId });
@@ -337,38 +246,34 @@ app.post('/api/newsletter/subscribe', async (req, res) => {
   const existing = await Newsletter.findOne({ email });
   if (existing) return res.status(400).json({ message: 'Already subscribed' });
   await Newsletter.create({ email });
-  res.json({ message: 'Subscribed successfully' });
+  res.json({ message: 'Subscribed' });
 });
-
 app.get('/api/admin/newsletter', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const subscribers = await Newsletter.find().sort({ subscribedAt: -1 });
   res.json(subscribers);
 });
-
 app.delete('/api/admin/newsletter/:id', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   await Newsletter.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Subscriber removed' });
+  res.json({ message: 'Deleted' });
 });
 
-// ========== CONTACT MESSAGES (ADMIN) ==========
+// ========== CONTACT MESSAGES (admin) ==========
 app.get('/api/admin/contact-messages', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const messages = await ContactMessage.find().sort({ createdAt: -1 }).populate('userId', 'fullName email');
   res.json(messages);
 });
-
 app.patch('/api/admin/contact-messages/:id/read', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   await ContactMessage.findByIdAndUpdate(req.params.id, { isRead: true });
   res.json({ success: true });
 });
-
 app.delete('/api/admin/contact-messages/:id', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   await ContactMessage.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Message deleted' });
+  res.json({ message: 'Deleted' });
 });
 
 // ========== KYC ADMIN ==========
@@ -377,7 +282,6 @@ app.get('/api/admin/kyc/pending', authMiddleware, async (req, res) => {
   const users = await User.find({ kycStatus: 'PENDING' }).select('fullName email kycDocuments ssnLast4 createdAt');
   res.json(users);
 });
-
 app.patch('/api/admin/kyc/:userId', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const { status } = req.body;
@@ -385,58 +289,53 @@ app.patch('/api/admin/kyc/:userId', authMiddleware, async (req, res) => {
   res.json(user);
 });
 
-// ========== NOTIFICATIONS ==========
-app.get('/api/user/notifications', authMiddleware, async (req, res) => {
-  const notifications = await Notification.find({ userId: req.user.id }).sort({ createdAt: -1 }).limit(50);
-  res.json(notifications);
-});
-
-app.patch('/api/user/notifications/:id/read', authMiddleware, async (req, res) => {
-  await Notification.findByIdAndUpdate(req.params.id, { isRead: true });
-  res.json({ success: true });
-});
-
-async function createNotification(userId, title, message, type = 'INFO') {
-  const notification = await Notification.create({ userId, title, message, type });
-  const socketId = userSockets.get(userId);
-  if (socketId) io.to(socketId).emit('notification', notification);
-}
-
 // ========== REVIEWS ==========
-app.post('/api/reviews/submit', async (req, res) => {
-  const { name, email, rating, text } = req.body;
-  if (!name || !email || !rating || !text) {
-    return res.status(400).json({ message: 'All fields required' });
-  }
-  const review = await Review.create({ name, email, rating, text, isActive: false });
-  res.status(201).json({ message: 'Review submitted for approval' });
-});
-
 app.get('/api/reviews', async (req, res) => {
   const reviews = await Review.find({ isActive: true }).sort({ createdAt: -1 });
   res.json(reviews);
 });
-
+app.post('/api/reviews/submit', async (req, res) => {
+  const { name, email, rating, text } = req.body;
+  if (!name || !email || !rating || !text) return res.status(400).json({ message: 'All fields required' });
+  const review = await Review.create({ name, email, rating, text, isActive: false });
+  res.status(201).json({ message: 'Review submitted for approval' });
+});
 app.get('/api/admin/reviews', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const reviews = await Review.find().sort({ createdAt: -1 });
   res.json(reviews);
 });
-
 app.patch('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const { isActive } = req.body;
   const review = await Review.findByIdAndUpdate(req.params.id, { isActive }, { new: true });
   res.json(review);
 });
-
 app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   await Review.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Review deleted' });
+  res.json({ message: 'Deleted' });
 });
 
-// ========== ERROR HANDLER ==========
+// ========== TRADE (simulated) ==========
+app.post('/api/trade', authMiddleware, (req, res) => res.status(201).json({ message: 'Trade executed (simulated)' }));
+app.get('/api/trade', authMiddleware, (req, res) => res.json([]));
+
+// ========== NOTIFICATIONS ==========
+app.get('/api/user/notifications', authMiddleware, async (req, res) => {
+  const notifications = await Notification.find({ userId: req.user.id }).sort({ createdAt: -1 }).limit(50);
+  res.json(notifications);
+});
+app.patch('/api/user/notifications/:id/read', authMiddleware, async (req, res) => {
+  await Notification.findByIdAndUpdate(req.params.id, { isRead: true });
+  res.json({ success: true });
+});
+async function createNotification(userId, title, message, type = 'INFO') {
+  const notification = await Notification.create({ userId, title, message, type });
+  const socketId = userSockets.get(userId);
+  if (socketId) io.to(socketId).emit('notification', notification);
+}
+
 app.use(errorHandler);
 setupSocket(io);
 
