@@ -35,6 +35,7 @@ mongoose.connect(process.env.MONGODB_URI)
 app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(helmet());
 app.use(express.json());
+app.use('/uploads', express.static('uploads'));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 app.use(passport.initialize());
 
