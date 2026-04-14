@@ -35,7 +35,7 @@ mongoose.connect(process.env.MONGODB_URI)
 app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(helmet());
 app.use(express.json());
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 5000 }));
 
 // Passport initialization
 app.use(passport.initialize());
