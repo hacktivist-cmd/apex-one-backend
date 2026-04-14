@@ -15,6 +15,8 @@ const User = require('./models/User');
 const Transaction = require('./models/Transaction');
 const ContactMessage = require('./models/ContactMessage');
 const Newsletter = require('./models/Newsletter');
+const Notification = require('./models/Notification');
+const Review = require('./models/Review');
 const { errorHandler } = require('./middleware/errorHandler');
 const { setupSocket, emitBalanceUpdate } = require('./socket/socket');
 
@@ -37,10 +39,9 @@ app.use(helmet());
 app.use(express.json());
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 5000 }));
 
-// Passport initialization
 app.use(passport.initialize());
 
-// ========== GOOGLE OAUTH STRATEGY ==========
+// ========== GOOGLE OAUTH ==========
 passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
@@ -74,7 +75,6 @@ passport.use(new GoogleStrategy({
   }
 ));
 
-// ========== GOOGLE OAUTH ROUTES ==========
 app.get('/api/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 
 app.get('/api/auth/google/callback', 
@@ -97,7 +97,7 @@ app.get('/api/auth/google/callback',
 app.get('/', (req, res) => res.send('Backend alive'));
 app.get('/ping', (req, res) => res.send('pong'));
 
-// ========== REGISTRATION ==========
+// ========== AUTHENTICATION ==========
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { firstName, middleName, lastName, email, password, phone, postcode } = req.body;
@@ -118,7 +118,6 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
-// ========== LOGIN ==========
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -175,6 +174,25 @@ app.post('/api/user/change-password', authMiddleware, async (req, res) => {
   res.json({ message: 'Password updated' });
 });
 
+// ========== BALANCE HISTORY ==========
+app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  const days = 7;
+  const history = [];
+  let current = user.availableBalance * 0.85;
+  for (let i = days; i >= 0; i--) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    history.push({
+      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      balance: current
+    });
+    current = current * (1 + (Math.random() - 0.5) * 0.05);
+  }
+  res.json(history);
+});
+
 // ========== DEPOSIT & WITHDRAWAL ==========
 app.post('/api/deposit/request', authMiddleware, async (req, res) => {
   const { amount, cryptoType, cryptoTxId } = req.body;
@@ -196,6 +214,11 @@ app.post('/api/withdrawals', authMiddleware, async (req, res) => {
 
 app.get('/api/withdrawals', authMiddleware, async (req, res) => {
   const transactions = await Transaction.find({ userId: req.user.id, type: 'WITHDRAWAL' });
+  res.json(transactions);
+});
+
+app.get('/api/user/transactions', authMiddleware, async (req, res) => {
+  const transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 });
   res.json(transactions);
 });
 
@@ -300,7 +323,7 @@ app.post('/api/admin/simulation/stop', authMiddleware, async (req, res) => {
 app.post('/api/trade', authMiddleware, (req, res) => res.status(201).json({ message: 'Trade executed (simulated)' }));
 app.get('/api/trade', authMiddleware, (req, res) => res.json([]));
 
-// ========== CONTACT (public) ==========
+// ========== CONTACT ==========
 app.post('/api/contact', async (req, res) => {
   const { name, email, message, userId } = req.body;
   await ContactMessage.create({ name, email, message, userId });
@@ -329,7 +352,7 @@ app.delete('/api/admin/newsletter/:id', authMiddleware, async (req, res) => {
   res.json({ message: 'Subscriber removed' });
 });
 
-// ========== CONTACT MESSAGES (admin) ==========
+// ========== CONTACT MESSAGES (ADMIN) ==========
 app.get('/api/admin/contact-messages', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const messages = await ContactMessage.find().sort({ createdAt: -1 }).populate('userId', 'fullName email');
@@ -362,135 +385,24 @@ app.patch('/api/admin/kyc/:userId', authMiddleware, async (req, res) => {
   res.json(user);
 });
 
+// ========== NOTIFICATIONS ==========
+app.get('/api/user/notifications', authMiddleware, async (req, res) => {
+  const notifications = await Notification.find({ userId: req.user.id }).sort({ createdAt: -1 }).limit(50);
+  res.json(notifications);
+});
+
+app.patch('/api/user/notifications/:id/read', authMiddleware, async (req, res) => {
+  await Notification.findByIdAndUpdate(req.params.id, { isRead: true });
+  res.json({ success: true });
+});
+
+async function createNotification(userId, title, message, type = 'INFO') {
+  const notification = await Notification.create({ userId, title, message, type });
+  const socketId = userSockets.get(userId);
+  if (socketId) io.to(socketId).emit('notification', notification);
+}
+
 // ========== REVIEWS ==========
-const Review = require('./models/Review');
-
-app.get('/api/reviews', async (req, res) => {
-  const reviews = await Review.find({ isActive: true }).sort({ createdAt: -1 });
-  res.json(reviews);
-});
-
-app.post('/api/admin/reviews', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const { name, text, rating, image } = req.body;
-  const review = await Review.create({ name, text, rating, image });
-  res.status(201).json(review);
-});
-
-app.put('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const review = await Review.findByIdAndUpdate(req.params.id, req.body, { new: true });
-  res.json(review);
-});
-
-app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  await Review.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Review deleted' });
-});
-
-app.get('/api/admin/reviews', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const reviews = await Review.find().sort({ createdAt: -1 });
-  res.json(reviews);
-});
-
-app.use(errorHandler);
-setupSocket(io);
-
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-
-// ========== REVIEWS (public + authenticated) ==========
-
-// Public: get approved reviews
-app.get('/api/reviews', async (req, res) => {
-  const reviews = await Review.find({ isActive: true }).sort({ createdAt: -1 }).populate('userId', 'fullName profilePicture');
-  res.json(reviews);
-});
-
-// Authenticated user: submit a review (pending)
-app.post('/api/reviews', authMiddleware, async (req, res) => {
-  const { text, rating } = req.body;
-  if (!text || !rating) return res.status(400).json({ message: 'Text and rating required' });
-  const user = await User.findById(req.user.id);
-  const review = await Review.create({
-    userId: req.user.id,
-    name: user.fullName,
-    text,
-    rating,
-    image: user.profilePicture || '',
-    isActive: false,
-  });
-  res.status(201).json({ message: 'Review submitted for approval', review });
-});
-
-// Admin: get all reviews (including pending)
-app.get('/api/admin/reviews', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const reviews = await Review.find().sort({ createdAt: -1 }).populate('userId', 'fullName email');
-  res.json(reviews);
-});
-
-// Admin: approve review (set isActive = true)
-app.patch('/api/admin/reviews/:id/approve', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const review = await Review.findByIdAndUpdate(req.params.id, { isActive: true }, { new: true });
-  res.json(review);
-});
-
-// Admin: reject/delete review
-app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  await Review.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Review deleted' });
-});
-
-// ========== REVIEWS (public submit & admin manage) ==========
-
-// Public: submit a review (pending approval)
-app.post('/api/reviews/submit', async (req, res) => {
-  const { name, email, rating, text } = req.body;
-  if (!name || !email || !rating || !text) {
-    return res.status(400).json({ message: 'All fields required' });
-  }
-  const review = await Review.create({
-    name, email, rating, text, isActive: false
-  });
-  res.status(201).json({ message: 'Review submitted for approval', review });
-});
-
-// Public: get approved reviews (for landing page)
-app.get('/api/reviews', async (req, res) => {
-  const reviews = await Review.find({ isActive: true }).sort({ createdAt: -1 });
-  res.json(reviews);
-});
-
-// Admin: get all reviews (including pending)
-app.get('/api/admin/reviews', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const reviews = await Review.find().sort({ createdAt: -1 });
-  res.json(reviews);
-});
-
-// Admin: approve/reject a review
-app.patch('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  const { isActive } = req.body; // true = approved, false = rejected/pending
-  const review = await Review.findByIdAndUpdate(req.params.id, { isActive, updatedAt: Date.now() }, { new: true });
-  res.json(review);
-});
-
-// Admin: delete a review
-app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
-  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
-  await Review.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Review deleted' });
-});
-
-// ========== REVIEWS SYSTEM ==========
-
-// Public: submit a review (pending approval)
 app.post('/api/reviews/submit', async (req, res) => {
   const { name, email, rating, text } = req.body;
   if (!name || !email || !rating || !text) {
@@ -500,20 +412,17 @@ app.post('/api/reviews/submit', async (req, res) => {
   res.status(201).json({ message: 'Review submitted for approval' });
 });
 
-// Public: get approved reviews
 app.get('/api/reviews', async (req, res) => {
   const reviews = await Review.find({ isActive: true }).sort({ createdAt: -1 });
   res.json(reviews);
 });
 
-// Admin: get all reviews (pending + approved)
 app.get('/api/admin/reviews', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const reviews = await Review.find().sort({ createdAt: -1 });
   res.json(reviews);
 });
 
-// Admin: approve/reject review
 app.patch('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const { isActive } = req.body;
@@ -521,166 +430,15 @@ app.patch('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
   res.json(review);
 });
 
-// Admin: delete review
 app.delete('/api/admin/reviews/:id', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   await Review.findByIdAndDelete(req.params.id);
   res.json({ message: 'Review deleted' });
 });
 
-// ========== NOTIFICATIONS ==========
-const Notification = require('./models/Notification');
+// ========== ERROR HANDLER ==========
+app.use(errorHandler);
+setupSocket(io);
 
-// Get user notifications
-app.get('/api/user/notifications', authMiddleware, async (req, res) => {
-  const notifications = await Notification.find({ userId: req.user.id }).sort({ createdAt: -1 }).limit(50);
-  res.json(notifications);
-});
-
-// Mark notification as read
-app.patch('/api/user/notifications/:id/read', authMiddleware, async (req, res) => {
-  await Notification.findByIdAndUpdate(req.params.id, { isRead: true });
-  res.json({ success: true });
-});
-
-// Helper function to create notification (must be placed after io is defined)
-// Add this inside the socket setup section or after io is defined.
-// We'll add a separate function that uses io from the socket module.
-
-// Helper to create and emit notification
-async function createNotification(userId, title, message, type = 'INFO') {
-  const notification = await Notification.create({ userId, title, message, type });
-  const socketId = userSockets.get(userId);
-  if (socketId) io.to(socketId).emit('notification', notification);
-}
-
-// ========== USER TRANSACTIONS ==========
-app.get('/api/user/transactions', authMiddleware, async (req, res) => {
-  const transactions = await Transaction.find({ userId: req.user.id }).sort({ createdAt: -1 });
-  res.json(transactions);
-});
-
-// ========== REVIEWS SUBMISSION (PUBLIC) ==========
-app.post('/api/reviews/submit', async (req, res) => {
-  const { name, email, rating, text } = req.body;
-  if (!name || !email || !rating || !text) {
-    return res.status(400).json({ message: 'All fields required' });
-  }
-  const review = await Review.create({ name, email, rating, text, isActive: false });
-  res.status(201).json({ message: 'Review submitted for approval' });
-});
-
-// ========== REVIEWS (PUBLIC SUBMISSION) ==========
-
-app.post('/api/reviews/submit', async (req, res) => {
-  const { name, email, rating, text } = req.body;
-  if (!name || !email || !rating || !text) {
-    return res.status(400).json({ message: 'All fields required' });
-  }
-  const review = await Review.create({ name, email, rating, text, isActive: false });
-  res.status(201).json({ message: 'Review submitted for approval' });
-});
-
-// ========== KYC UPLOAD (with multer) ==========
-const multer = require('multer');
-const upload = multer({ dest: 'uploads/' });
-
-// KYC submission (already in user.js, but ensure it's correct)
-// If not present, add:
-router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
-  const { ssn } = req.body;
-  const user = await User.findById(req.user.id);
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  const last4 = ssn.slice(-4);
-  user.kycDocuments.push(req.file.path);
-  user.kycStatus = 'PENDING';
-  user.ssnLast4 = last4;
-  await user.save();
-  res.json({ message: 'KYC documents submitted' });
-});
-
-// ========== BALANCE HISTORY (for chart) ==========
-app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
-  // For simplicity, generate mock historical data based on current balance
-  // In production, store daily snapshots in EquityHistory model
-  const days = 7;
-  const history = [];
-  let current = req.user.availableBalance * 0.85;
-  for (let i = days; i >= 0; i--) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    history.push({
-      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      balance: current
-    });
-    current = current * (1 + (Math.random() - 0.5) * 0.05);
-  }
-  res.json(history);
-});
-
-// ========== REVIEWS (PUBLIC SUBMISSION) ==========
-
-app.post('/api/reviews/submit', async (req, res) => {
-  const { name, email, rating, text } = req.body;
-  if (!name || !email || !rating || !text) {
-    return res.status(400).json({ message: 'All fields required' });
-  }
-  const review = await Review.create({ name, email, rating, text, isActive: false });
-  res.status(201).json({ message: 'Review submitted for approval' });
-});
-
-// ========== KYC UPLOAD (with multer) ==========
-const multer = require('multer');
-const upload = multer({ dest: 'uploads/' });
-
-// KYC submission (already in user.js, but ensure it's correct)
-// If not present, add:
-router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
-  const { ssn } = req.body;
-  const user = await User.findById(req.user.id);
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  const last4 = ssn.slice(-4);
-  user.kycDocuments.push(req.file.path);
-  user.kycStatus = 'PENDING';
-  user.ssnLast4 = last4;
-  await user.save();
-  res.json({ message: 'KYC documents submitted' });
-});
-
-// ========== BALANCE HISTORY (for chart) ==========
-app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
-  // For simplicity, generate mock historical data based on current balance
-  // In production, store daily snapshots in EquityHistory model
-  const days = 7;
-  const history = [];
-  let current = req.user.availableBalance * 0.85;
-  for (let i = days; i >= 0; i--) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    history.push({
-      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      balance: current
-    });
-    current = current * (1 + (Math.random() - 0.5) * 0.05);
-  }
-  res.json(history);
-});
-
-// ========== BALANCE HISTORY ==========
-app.get('/api/user/balance-history', authMiddleware, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  if (!user) return res.status(404).json({ message: 'User not found' });
-  const days = 7;
-  const history = [];
-  let current = user.availableBalance * 0.85;
-  for (let i = days; i >= 0; i--) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    history.push({
-      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      balance: current
-    });
-    current = current * (1 + (Math.random() - 0.5) * 0.05);
-  }
-  res.json(history);
-});
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
