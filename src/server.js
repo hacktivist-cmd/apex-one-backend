@@ -414,7 +414,7 @@ app.post('/api/admin/simulation/stop-all', authMiddleware, async (req, res) => {
 });
 
 // ========== INVESTMENT (with vesting) ==========
-const Investment = require('./models/Investment');
+global.Investment = global.Investment || require('./models/Investment');
 
 app.post('/api/invest', authMiddleware, async (req, res) => {
   const { symbol, amount, quantity } = req.body;
@@ -537,8 +537,6 @@ app.post('/api/admin/simulation/stop-all', authMiddleware, async (req, res) => {
 });
 
 // ========== INVESTMENT (with vesting) ==========
-const Investment = require('./models/Investment');
-
 app.post('/api/invest', authMiddleware, async (req, res) => {
   try {
     const { symbol, amount, quantity } = req.body;
