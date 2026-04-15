@@ -39,8 +39,9 @@ router.put('/profile', async (req, res) => {
 router.post('/upload-picture', upload.single('profilePicture'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
-    // Return the file URL (the backend will serve it statically)
-    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    // Force HTTPS URL
+    const host = req.get('host');
+    const fileUrl = `https://${host}/uploads/${req.file.filename}`;
     const user = await User.findByIdAndUpdate(req.user.id, { profilePicture: fileUrl }, { new: true });
     res.json({ message: 'Uploaded', profilePicture: user.profilePicture });
   } catch (err) {
@@ -56,7 +57,8 @@ router.post('/kyc', upload.single('kycDocument'), async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
     const last4 = ssn.slice(-4);
-    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    const host = req.get('host');
+    const fileUrl = `https://${host}/uploads/${req.file.filename}`;
     user.kycDocuments.push(fileUrl);
     user.kycStatus = 'PENDING';
     user.ssnLast4 = last4;

@@ -32,8 +32,8 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ MongoDB connected'))
   .catch(err => console.log('❌ MongoDB error:', err));
 
-app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(helmet());
+app.use(cors({ origin: process.env.FRONTEND_URL || 'https://apex-one-usa.netlify.app', credentials: true }));
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 app.use('/uploads', express.static('uploads'));
