@@ -641,3 +641,76 @@ app.post('/api/admin/process-matured', authMiddleware, async (req, res) => {
   }
   res.json({ message: `Processed ${count} matured investments` });
 });
+
+// ========== ADMIN USER MANAGEMENT (FIXED) ==========
+app.get('/api/admin/users', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  const users = await User.find().select('-passwordHash');
+  res.json(users);
+});
+
+app.post('/api/admin/users', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  try {
+    const { fullName, email, password, role, availableBalance } = req.body;
+    if (!fullName || !email || !password) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(400).json({ message: 'Email already exists' });
+    const hashed = await bcrypt.hash(password, 10);
+    const user = await User.create({
+      fullName,
+      email,
+      passwordHash: hashed,
+      role: role || 'USER',
+      availableBalance: availableBalance || 0,
+    });
+    res.status(201).json(user);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+app.delete('/api/admin/users/:id', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.role === 'ADMIN') return res.status(403).json({ message: 'Cannot delete admin' });
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ message: 'User deleted' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+app.patch('/api/admin/users/:id/balance', authMiddleware, async (req, res) => {
+  if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
+  try {
+    const { availableBalance } = req.body;
+    const user = await User.findByIdAndUpdate(req.params.id, { availableBalance }, { new: true }).select('-passwordHash');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    emitBalanceUpdate(req.params.id, user.availableBalance, user.lockedBalance);
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ========== USER SELF-DELETE ACCOUNT ==========
+app.delete('/api/user/account', authMiddleware, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    // Prevent admin from deleting themselves via this route (they can use admin delete)
+    await User.findByIdAndDelete(req.user.id);
+    // Also delete all related data (transactions, investments, etc.)
+    await Transaction.deleteMany({ userId: req.user.id });
+    await Investment.deleteMany({ userId: req.user.id });
+    await Notification.deleteMany({ userId: req.user.id });
+    res.json({ message: 'Account deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
