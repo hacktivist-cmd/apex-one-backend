@@ -7,7 +7,7 @@ const investmentSchema = new mongoose.Schema({
   quantity: Number,
   status: { type: String, enum: ['ACTIVE', 'MATURED', 'WITHDRAWN'], default: 'ACTIVE' },
   startDate: { type: Date, default: Date.now },
-  vestingDate: { type: Date, required: true }, // 2 weeks after start
+  vestingDate: { type: Date, required: true },
   createdAt: { type: Date, default: Date.now },
 });
 
