@@ -357,7 +357,6 @@ app.use('/uploads', express.static('uploads'));
 app.use('/uploads', express.static('uploads'));
 
 // Simulation intervals storage (global)
-const activeSimulations = new Map(); // userId -> interval
 let globalSimulationInterval = null;
 
 app.post('/api/admin/simulation/start', authMiddleware, async (req, res) => {
@@ -485,9 +484,7 @@ app.post('/api/admin/process-matured', authMiddleware, async (req, res) => {
 });
 
 // ========== SIMULATION (persistent intervals) ==========
-const activeSimulations = new Map(); // userId -> interval
 let globalSimulationInterval = null;
-
 app.post('/api/admin/simulation/start', authMiddleware, async (req, res) => {
   if (req.user.role !== 'ADMIN') return res.status(403).json({ message: 'Admin only' });
   const { userId, growthRate } = req.body;
